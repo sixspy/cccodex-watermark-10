@@ -10,6 +10,8 @@ class Config:
     ADMIN_USER = "admin"
     ADMIN_PASSWORD = "123456"
     DEFAULT_DB = str(ROOT / "instance" / "watermark_lab.db")
+    # 并发纠偏抢写锁的等待上限（毫秒）
+    BUSY_TIMEOUT_MS = int(os.environ.get("BUSY_TIMEOUT_MS", "5000"))
 
     @classmethod
     def database(cls) -> str:

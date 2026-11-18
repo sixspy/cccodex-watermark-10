@@ -1,4 +1,5 @@
 import os
+import uuid
 
 import pytest_asyncio
 from blacksheep.contents import JSONContent
@@ -6,6 +7,14 @@ from blacksheep.testing import TestClient
 
 from app.db import init_db
 from app.main import app
+
+
+def _fast_db_path(tmp_path) -> str:
+    # WSL2/9p 上 SQLite 建库有明显秒级开销；有 tmpfs 时用它，每测试仍独立一库
+    shm = "/dev/shm"
+    if os.path.isdir(shm) and os.access(shm, os.W_OK):
+        return os.path.join(shm, f"wm-test-{uuid.uuid4().hex}.db")
+    return str(tmp_path / "test.db")
 
 
 def _cookie_jar(response) -> dict[str, str]:
@@ -31,15 +40,19 @@ def _cookie_jar(response) -> dict[str, str]:
 
 @pytest_asyncio.fixture()
 async def client(tmp_path):
-    db = tmp_path / "test.db"
-    os.environ["DATABASE_PATH"] = str(db)
-    init_db(str(db))
+    db = _fast_db_path(tmp_path)
+    os.environ["DATABASE_PATH"] = db
+    init_db(db)
     await app.start()
     c = TestClient(app)
     try:
         yield c
     finally:
         await app.stop()
+        try:
+            os.remove(db)
+        except OSError:
+            pass
 
 
 @pytest_asyncio.fixture()

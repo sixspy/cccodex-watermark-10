@@ -5,12 +5,19 @@ from blacksheep.server.responses import redirect
 from itsdangerous import BadSignature, URLSafeSerializer
 
 from app.config import Config
-from app.db import init_db
+from app.db import get_db, init_db
 from app.services import (
+    correct_header,
+    gap_cards,
     get_batch,
     list_batches,
+    list_headers,
+    list_replay_logs,
+    list_records,
     list_reports,
     list_templates,
+    open_snapshot,
+    replay_record,
     run_gap_report,
     stamp_batch,
     trace_downstream,
@@ -122,7 +129,7 @@ async def api_meta(request: Request):
         {
             "lab_name": Config.LAB_NAME,
             "product_line": "cc-watermark-lab",
-            "chain": ["水印模板", "批次盖印", "下游追索", "缺口对账"],
+            "chain": ["水印模板", "批次盖印", "下游追索", "缺口对账", "水印核对"],
         }
     )
 
@@ -159,7 +166,28 @@ async def api_batch_detail(request: Request):
     batch = get_batch(batch_id)
     if not batch:
         return json_response({"error": "批次不存在"}, 404)
-    return json_response({"batch": batch})
+    # 批次详情：同查所属批头栏的头栏数/实数/漂移差量
+    header_info = None
+    with get_db() as conn:
+        h = conn.execute(
+            "SELECT * FROM batch_headers WHERE biz_date=? AND table_name=?",
+            (batch["biz_date"], batch["table_name"]),
+        ).fetchone()
+        if h:
+            actual = conn.execute(
+                "SELECT COUNT(*) AS c FROM run_batches WHERE biz_date=? "
+                "AND table_name=? AND status='已盖印'",
+                (batch["biz_date"], batch["table_name"]),
+            ).fetchone()["c"]
+            header_info = {
+                "header_id": h["id"],
+                "declared_stamped": h["declared_stamped"],
+                "actual_stamped": actual,
+                "delta": int(h["declared_stamped"]) - int(actual),
+                "drifted": int(h["declared_stamped"]) != int(actual),
+                "version_no": h["version_no"],
+            }
+    return json_response({"batch": batch, "header": header_info})
 
 
 @app.router.post("/api/batches/{batch_id}/stamp")
@@ -203,3 +231,83 @@ async def api_gap_run(request: Request):
     body = await request.json()
     report = run_gap_report(str(body.get("as_of_date", "2026-11-16")))
     return json_response({"ok": True, "report": report})
+
+
+# ---------------- 水印核对台 ----------------
+
+
+@app.router.get("/api/reconcile/headers")
+async def api_reconcile_headers(request: Request):
+    try:
+        require_user(request)
+    except ServiceError as exc:
+        return json_response({"error": exc.message}, exc.status_code)
+    return json_response({"items": list_headers()})
+
+
+@app.router.post("/api/reconcile/headers/{header_id}/snapshot")
+async def api_reconcile_snapshot(request: Request):
+    try:
+        user = require_user(request)
+        header_id = int(request.route_values["header_id"])
+        snapshot = open_snapshot(header_id)
+    except ServiceError as exc:
+        return json_response({"ok": False, "error": exc.message}, exc.status_code)
+    return json_response({"ok": True, "snapshot": snapshot, "operator": user})
+
+
+@app.router.post("/api/reconcile/headers/{header_id}/correct")
+async def api_reconcile_correct(request: Request):
+    try:
+        user = require_user(request)
+        header_id = int(request.route_values["header_id"])
+        body = await request.json()
+        mode = str(body.get("mode", "")).strip()
+        snapshot_id = body.get("snapshot_id")
+        result = correct_header(
+            header_id,
+            mode,
+            operator=user,
+            snapshot_id=int(snapshot_id) if snapshot_id is not None else None,
+        )
+    except ServiceError as exc:
+        return json_response({"ok": False, "error": exc.message}, exc.status_code)
+    return json_response({"ok": True, "result": result})
+
+
+@app.router.get("/api/reconcile/records")
+async def api_reconcile_records(request: Request):
+    try:
+        require_user(request)
+    except ServiceError as exc:
+        return json_response({"error": exc.message}, exc.status_code)
+    return json_response({"items": list_records()})
+
+
+@app.router.post("/api/reconcile/records/{record_id}/replay")
+async def api_reconcile_replay(request: Request):
+    try:
+        require_user(request)
+        record_id = int(request.route_values["record_id"])
+        result = replay_record(record_id)
+    except ServiceError as exc:
+        return json_response({"ok": False, "error": exc.message}, exc.status_code)
+    return json_response({"ok": True, "replay": result})
+
+
+@app.router.get("/api/reconcile/replay-logs")
+async def api_reconcile_logs(request: Request):
+    try:
+        require_user(request)
+    except ServiceError as exc:
+        return json_response({"error": exc.message}, exc.status_code)
+    return json_response({"items": list_replay_logs()})
+
+
+@app.router.get("/api/reconcile/gap-cards")
+async def api_reconcile_gap_cards(request: Request):
+    try:
+        require_user(request)
+    except ServiceError as exc:
+        return json_response({"error": exc.message}, exc.status_code)
+    return json_response({"items": gap_cards()})
